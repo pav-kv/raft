@@ -14,7 +14,11 @@
 
 package raft
 
-import pb "go.etcd.io/raft/v3/raftpb"
+import (
+	"fmt"
+
+	pb "go.etcd.io/raft/v3/raftpb"
+)
 
 // unstable contains "unstable" log entries and snapshot state that has
 // not yet been written to Storage. The type serves two roles. First, it
@@ -242,4 +246,99 @@ func (u *unstable) mustCheckOutOfBounds(lo, hi uint64) {
 	if lo < u.offset || hi > upper {
 		u.logger.Panicf("unstable.slice[%d,%d) out of bound [%d,%d]", lo, hi, u.offset, upper)
 	}
+}
+
+type appendMark struct {
+	term  uint64
+	index uint64
+}
+
+// appendTracker tracks the set of in-flight asynchronous append messages. The
+// messages may have been sent under different leader terms. Later terms may
+// backtrack the log index, thus truncating overriding the log starting from
+// this position.
+//
+//	unstable: (-----------------------]
+//	          .   .   .       .       .
+//	t9: |     .   .   .       (-------]
+//	t7: |     .   .   (---]-------]
+//	t4: |     .   (---]
+//	t3: |     (-----------------]
+//	    +--------------------------------> index
+//	         10  20  30  40  50  60  70
+//
+// We track the "frontier" of the appends that may take effect, i.e. all appends
+// which still have at least one entry in the unstable structure. In the example
+// picture above, if there is a new append at (term 10, index 30), it overrides
+// the entire stream at term 7 and 9, and removes them from the tracker. Even if
+// storage ends up writing them, all of these entries are already erased from
+// unstable, and are to be overwritten.
+//
+// TODO(during review): explain better.
+type appendTracker struct {
+	// marks contains the "frontier" of the in-flight append messages. For every
+	// leadership term that has sent at least one entry that is still in unstable,
+	// there is a mark in this slice.
+	//
+	// INVARIANT: len(marks) > 0
+	// INVARIANT: marks[i+1].term > marks[i].term
+	// INVARIANT: marks[i+1].index > marks[i].index
+	//
+	// Invariants make it possible to perform the add() and ack() operations in
+	// amortized O(1) time.
+	//
+	// Most of the time, len(marks) <= 2. It has a single entry during normal
+	// operation, and 2 entries when leadership changes. More than 2 entries may
+	// indicate that the storage appends handling is slow, the in-flight buffer is
+	// large, or that leadership changes are too frequent.
+	//
+	// TODO(pavelkalinnikov): use a small circular buffer to avoid most of the
+	// slice allocations.
+	//
+	// TODO(pavelkalinnikov): integrate with the commit index. We can't append at
+	// index <= commit, so it would be convenient to track here too.
+	//
+	// TODO(pavelkalinnikov): integrate with snapshots. A snapshot is a specific
+	// "append" that doesn't have to be contiguous with the previous appends, i.e.
+	// it's just a "jump" in the index.
+	marks []appendMark
+}
+
+func newAppendTracker() appendTracker {
+	// Start from a single "sentinel"  mark.
+	return appendTracker{marks: make([]appendMark, 1)}
+}
+
+// add registers the given append mark with the tracker. The mark must not be
+// less, in the (term, index) tuple comparison sense, than of all previously
+// added and acked marks.
+func (a *appendTracker) add(mark appendMark) error {
+	head := len(a.marks)
+	if h := a.marks[head-1]; mark.term < h.term || mark.term == h.term && mark.index < h.index {
+		return fmt.Errorf("adding mark %+v out of order: already at %+v", mark, h)
+	}
+	for ; head > 0 && mark.index <= a.marks[head-1].index; head-- {
+	}
+	a.marks = append(a.marks[:head], mark)
+	return nil
+}
+
+// ack declares that all appends up to the given mark have been completed. If
+// this mark is below previously acked marks, in the (term, index) tuple
+// comparison sense, it is ignored.
+func (a *appendTracker) ack(mark appendMark) {
+	tail := 0
+	for ; tail < len(a.marks) && a.marks[tail].term < mark.term; tail++ {
+	}
+	a.marks = a.marks[tail:]
+	if len(a.marks) == 0 {
+		a.marks = append(a.marks, mark)
+	} else if t := a.marks[0]; mark.term == t.term && mark.index > t.index {
+		a.marks[0].index = mark.index
+	}
+}
+
+// mark returns the in-flight mark.
+func (a appendTracker) mark() appendMark {
+	return a.marks[0]
 }

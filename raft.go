@@ -346,6 +346,9 @@ type raft struct {
 	// Messages in this list have the type MsgAppResp, MsgVoteResp, or
 	// MsgPreVoteResp. See the comment in raft.send for details.
 	msgsAfterAppend []pb.Message
+	// appendTracker tracks the set of in-flight asynchronous append messages.
+	// Used only if async storage writes are enabled.
+	appTracker appendTracker
 
 	// the leader id
 	lead uint64
