@@ -79,11 +79,14 @@ func newLogWithSize(storage Storage, logger Logger, maxApplyingEntsSize entryEnc
 	if err != nil {
 		panic(err) // TODO(bdarnell)
 	}
+	lastTerm, err := storage.Term(lastIndex)
+	if err != nil {
+		panic(err) // TODO(pav-kv)
+	}
 	return &raftLog{
 		storage: storage,
 		unstable: unstable{
-			offset:           lastIndex + 1,
-			offsetInProgress: lastIndex + 1,
+			prev:   entryID{term: lastTerm, index: lastIndex},
 			logger:           logger,
 		},
 		maxApplyingEntsSize: maxApplyingEntsSize,
@@ -99,7 +102,10 @@ func newLogWithSize(storage Storage, logger Logger, maxApplyingEntsSize entryEnc
 
 func (l *raftLog) String() string {
 	return fmt.Sprintf("committed=%d, applied=%d, applying=%d, unstable.offset=%d, unstable.offsetInProgress=%d, len(unstable.Entries)=%d",
-		l.committed, l.applied, l.applying, l.unstable.offset, l.unstable.offsetInProgress, len(l.unstable.entries))
+		l.committed, l.applied, l.applying,
+		l.unstable.prev.index+1,
+		l.unstable.prev.index+1+uint64(l.unstable.inProgress),
+		len(l.unstable.entries))
 }
 
 // append returns true iff the entries were appended.
@@ -268,7 +274,7 @@ func (l *raftLog) hasNextCommittedEnts(allowUnstable bool) bool {
 func (l *raftLog) maxAppliableIndex(allowUnstable bool) uint64 {
 	hi := l.committed
 	if !allowUnstable {
-		hi = min(hi, l.unstable.offset-1)
+		hi = min(hi, l.unstable.prev.index)
 	}
 	return hi
 }
@@ -504,14 +510,14 @@ func (l *raftLog) slice(lo, hi uint64, maxSize entryEncodingSize) ([]pb.Entry, e
 	if lo == hi {
 		return nil, nil
 	}
-	if lo >= l.unstable.offset {
+	if lo > l.unstable.prev.index {
 		ents := limitSize(l.unstable.slice(lo, hi), maxSize)
 		// NB: use the full slice expression to protect the unstable slice from
 		// appends to the returned ents slice.
 		return ents[:len(ents):len(ents)], nil
 	}
 
-	cut := min(hi, l.unstable.offset)
+	cut := min(hi, l.unstable.prev.index+1)
 	ents, err := l.storage.Entries(lo, cut, uint64(maxSize))
 	if err == ErrCompacted {
 		return nil, err
@@ -520,7 +526,7 @@ func (l *raftLog) slice(lo, hi uint64, maxSize entryEncodingSize) ([]pb.Entry, e
 	} else if err != nil {
 		panic(err) // TODO(pavelkalinnikov): handle errors uniformly
 	}
-	if hi <= l.unstable.offset {
+	if hi < l.unstable.prev.index {
 		return ents, nil
 	}
 
@@ -537,7 +543,7 @@ func (l *raftLog) slice(lo, hi uint64, maxSize entryEncodingSize) ([]pb.Entry, e
 		return ents, nil
 	}
 
-	unstable := limitSize(l.unstable.slice(l.unstable.offset, hi), maxSize-size)
+	unstable := limitSize(l.unstable.slice(l.unstable.prev.index+1, hi), maxSize-size)
 	// Total size of unstable may exceed maxSize-size only if len(unstable) == 1.
 	// If this happens, ignore this extra entry.
 	if len(unstable) == 1 && size+entsSize(unstable) > maxSize {

@@ -55,8 +55,8 @@ func TestUnstableMaybeFirstIndex(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			u := unstable{
-				entries:  tt.entries,
-				offset:   tt.offset,
+				entries: tt.entries,
+				// FIXME: prev
 				snapshot: tt.snap,
 				logger:   raftLogger,
 			}
@@ -100,8 +100,8 @@ func TestMaybeLastIndex(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			u := unstable{
-				entries:  tt.entries,
-				offset:   tt.offset,
+				entries: tt.entries,
+				// FIXME: prev
 				snapshot: tt.snap,
 				logger:   raftLogger,
 			}
@@ -179,8 +179,8 @@ func TestUnstableMaybeTerm(t *testing.T) {
 	for i, tt := range tests {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
 			u := unstable{
-				entries:  tt.entries,
-				offset:   tt.offset,
+				entries: tt.entries,
+				// FIXME: prev
 				snapshot: tt.snap,
 				logger:   raftLogger,
 			}
@@ -193,9 +193,9 @@ func TestUnstableMaybeTerm(t *testing.T) {
 
 func TestUnstableRestore(t *testing.T) {
 	u := unstable{
+		prev:               entryID{term: 1, index: 4},
 		entries:            index(5).terms(1),
-		offset:             5,
-		offsetInProgress:   6,
+		inProgress:         1,
 		snapshot:           &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
 		snapshotInProgress: true,
 		logger:             raftLogger,
@@ -203,49 +203,48 @@ func TestUnstableRestore(t *testing.T) {
 	s := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 6, Term: 2}}
 	u.restore(s)
 
-	require.Equal(t, s.Metadata.Index+1, u.offset)
-	require.Equal(t, s.Metadata.Index+1, u.offsetInProgress)
+	require.Equal(t, entryID{term: s.Metadata.Term, index: s.Metadata.Index}, u.prev)
+	require.Zero(t, u.inProgress)
 	require.Zero(t, len(u.entries))
 	require.Equal(t, &s, u.snapshot)
 	require.False(t, u.snapshotInProgress)
 }
 
 func TestUnstableNextEntries(t *testing.T) {
-	tests := []struct {
-		entries          []pb.Entry
-		offset           uint64
-		offsetInProgress uint64
-
-		wentries []pb.Entry
+	prev := entryID{term: 1, index: 4}
+	for _, tt := range []struct {
+		entries    []pb.Entry
+		inProgress int
+		want       []pb.Entry
 	}{
 		// nothing in progress
 		{
-			index(5).terms(1, 1), 5, 5,
-			index(5).terms(1, 1),
+			entries: index(5).terms(1, 1),
+			want:    index(5).terms(1, 1),
 		},
 		// partially in progress
 		{
-			index(5).terms(1, 1), 5, 6,
-			index(6).terms(1),
+			entries:    index(5).terms(1, 1),
+			inProgress: 1,
+			want:       index(6).terms(1),
 		},
 		// everything in progress
 		{
-			index(5).terms(1, 1), 5, 7,
-			nil, // nil, not empty slice
+			entries:    index(5).terms(1, 1),
+			inProgress: 1,
+			want:       nil, // nil, not empty slice
 		},
-	}
-
-	for i, tt := range tests {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
+	} {
+		t.Run("", func(t *testing.T) {
 			u := unstable{
-				entries:          tt.entries,
-				offset:           tt.offset,
-				offsetInProgress: tt.offsetInProgress,
-				logger:           raftLogger,
+				prev:       prev,
+				entries:    tt.entries,
+				inProgress: tt.inProgress,
+				logger:     discardLogger,
 			}
-			res := u.nextEntries()
-			require.Equal(t, tt.wentries, res)
+			require.Equal(t, tt.want, u.nextEntries())
 		})
+
 	}
 }
 
@@ -287,125 +286,126 @@ func TestUnstableNextSnapshot(t *testing.T) {
 }
 
 func TestUnstableAcceptInProgress(t *testing.T) {
-	tests := []struct {
+	prev := entryID{term: 1, index: 4}
+	snap := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}}
+	for _, tt := range []struct {
 		entries            []pb.Entry
 		snapshot           *pb.Snapshot
-		offsetInProgress   uint64
+		inProgress         int
 		snapshotInProgress bool
 
-		woffsetInProgress   uint64
+		wInProgress         uint64
 		wsnapshotInProgress bool
 	}{
 		{
 			[]pb.Entry{}, nil,
-			5,     // no entries
+			0,     // no entries
 			false, // snapshot not already in progress
 			5, false,
 		},
 		{
 			index(5).terms(1), nil,
-			5,     // entries not in progress
+			0,     // entries not in progress
 			false, // snapshot not already in progress
-			6, false,
+			1, false,
 		},
 		{
 			index(5).terms(1, 1), nil,
-			5,     // entries not in progress
+			0,     // entries not in progress
 			false, // snapshot not already in progress
-			7, false,
+			2, false,
 		},
 		{
 			index(5).terms(1, 1), nil,
-			6,     // in-progress to the first entry
+			1,     // in-progress to the first entry
 			false, // snapshot not already in progress
-			7, false,
+			2, false,
 		},
 		{
 			index(5).terms(1, 1), nil,
-			7,     // in-progress to the second entry
+			2,     // in-progress to the second entry
 			false, // snapshot not already in progress
-			7, false,
+			2, false,
 		},
 		// with snapshot
 		{
-			[]pb.Entry{}, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,     // no entries
+			[]pb.Entry{}, &snap,
+			0,     // no entries
 			false, // snapshot not already in progress
-			5, true,
+			0, true,
 		},
 		{
-			index(5).terms(1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,     // entries not in progress
+			index(5).terms(1), &snap,
+			0,     // entries not in progress
 			false, // snapshot not already in progress
-			6, true,
+			1, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,     // entries not in progress
+			index(5).terms(1, 1), &snap,
+			0,     // entries not in progress
 			false, // snapshot not already in progress
-			7, true,
+			2, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			6,     // in-progress to the first entry
+			index(5).terms(1, 1), &snap,
+			1,     // in-progress to the first entry
 			false, // snapshot not already in progress
-			7, true,
+			2, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			7,     // in-progress to the second entry
+			index(5).terms(1, 1), &snap,
+			2,     // in-progress to the second entry
 			false, // snapshot not already in progress
-			7, true,
+			2, true,
 		},
 		{
-			[]pb.Entry{}, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,    // entries not in progress
+			[]pb.Entry{}, &snap,
+			0,    // entries not in progress
 			true, // snapshot already in progress
-			5, true,
+			0, true,
 		},
 		{
-			index(5).terms(1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,    // entries not in progress
+			index(5).terms(1), &snap,
+			0,    // entries not in progress
 			true, // snapshot already in progress
-			6, true,
+			1, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			5,    // entries not in progress
+			index(5).terms(1, 1), &snap,
+			0,    // entries not in progress
 			true, // snapshot already in progress
-			7, true,
+			2, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			6,    // in-progress to the first entry
+			index(5).terms(1, 1), &snap,
+			1,    // in-progress to the first entry
 			true, // snapshot already in progress
-			7, true,
+			2, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
-			7,    // in-progress to the second entry
+			index(5).terms(1, 1), &snap,
+			0,    // in-progress to the second entry
 			true, // snapshot already in progress
-			7, true,
+			0, true,
 		},
-	}
-
-	for i, tt := range tests {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
+	} {
+		t.Run("", func(t *testing.T) {
 			u := unstable{
+				prev:               prev,
 				entries:            tt.entries,
 				snapshot:           tt.snapshot,
-				offsetInProgress:   tt.offsetInProgress,
+				inProgress:         tt.inProgress,
 				snapshotInProgress: tt.snapshotInProgress,
 			}
 			u.acceptInProgress()
-			require.Equal(t, tt.woffsetInProgress, u.offsetInProgress)
+			require.Equal(t, tt.inProgress, u.inProgress)
 			require.Equal(t, tt.wsnapshotInProgress, u.snapshotInProgress)
 		})
 	}
 }
 
 func TestUnstableStableTo(t *testing.T) {
-	tests := []struct {
+	for _, tt := range []struct {
 		entries          []pb.Entry
 		offset           uint64
 		offsetInProgress uint64
@@ -482,10 +482,8 @@ func TestUnstableStableTo(t *testing.T) {
 			4, 1, // stable to old entry
 			5, 6, 1,
 		},
-	}
-
-	for i, tt := range tests {
-		t.Run(fmt.Sprint(i), func(t *testing.T) {
+	} {
+		t.Run("", func(t *testing.T) {
 			u := unstable{
 				entries:          tt.entries,
 				offset:           tt.offset,

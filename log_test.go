@@ -212,7 +212,7 @@ func TestAppend(t *testing.T) {
 			entries, err := log.entries(1, noLimit)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, entries)
-			require.Equal(t, tt.wunstable, log.unstable.offset)
+			require.Equal(t, tt.wunstable, log.unstable.prev.index+1)
 		})
 	}
 }
@@ -629,7 +629,7 @@ func TestNextUnstableEnts(t *testing.T) {
 				raftLog.stableTo(pbEntryID(&ents[l-1]))
 			}
 			require.Equal(t, tt.wents, ents)
-			require.Equal(t, previousEnts[len(previousEnts)-1].Index+1, raftLog.unstable.offset)
+			require.Equal(t, previousEnts[len(previousEnts)-1].Index, raftLog.unstable.prev.index)
 		})
 	}
 }
@@ -678,7 +678,7 @@ func TestStableTo(t *testing.T) {
 			raftLog := newLog(NewMemoryStorage(), raftLogger)
 			raftLog.bootstrap(t, entryID{}, index(1).terms(1, 2))
 			raftLog.stableTo(entryID{term: tt.stablet, index: tt.stablei})
-			require.Equal(t, tt.wunstable, raftLog.unstable.offset)
+			require.Equal(t, tt.wunstable, raftLog.unstable.prev.index+1)
 		})
 	}
 }
@@ -715,7 +715,7 @@ func TestStableToWithSnap(t *testing.T) {
 			raftLog := newLog(s, raftLogger)
 			raftLog.bootstrap(t, entryID{term: snapt, index: snapi}, tt.newEnts)
 			raftLog.stableTo(entryID{term: tt.stablet, index: tt.stablei})
-			require.Equal(t, tt.wunstable, raftLog.unstable.offset)
+			require.Equal(t, tt.wunstable, raftLog.unstable.prev.index+1)
 		})
 	}
 }
@@ -771,7 +771,7 @@ func TestLogRestore(t *testing.T) {
 	require.Zero(t, len(raftLog.allEntries()))
 	require.Equal(t, index+1, raftLog.firstIndex())
 	require.Equal(t, index, raftLog.committed)
-	require.Equal(t, index+1, raftLog.unstable.offset)
+	require.Equal(t, index, raftLog.unstable.prev.index)
 	require.Equal(t, term, mustTerm(raftLog.term(index)))
 }
 

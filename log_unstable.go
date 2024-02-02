@@ -33,18 +33,21 @@ import pb "go.etcd.io/raft/v3/raftpb"
 type unstable struct {
 	// the incoming unstable snapshot, if any.
 	snapshot *pb.Snapshot
+	// prev is the ID of the last log entry written to storage, or the ID of the
+	// snapshot if present. This entry immediately precedes entries[].
+	//
+	// TODO(pav-kv): (prev, entries) is now a logical unit equivalent to logAppend
+	// struct. Generalize logAppend to be a logSlice, and replace these fields. We
+	// need to fully support logAppend.term here first.
+	prev entryID
 	// all entries that have not yet been written to storage.
 	entries []pb.Entry
-	// entries[i] has raft log position i+offset.
-	offset uint64
 
 	// if true, snapshot is being written to storage.
 	snapshotInProgress bool
-	// entries[:offsetInProgress-offset] are being written to storage.
-	// Like offset, offsetInProgress is exclusive, meaning that it
-	// contains the index following the largest in-progress entry.
-	// Invariant: offset <= offsetInProgress
-	offsetInProgress uint64
+	// entries[:inProgress] are being written to storage.
+	// Invariant: inProgress <= len(entries).
+	inProgress int
 
 	logger Logger
 }
@@ -53,52 +56,49 @@ type unstable struct {
 // if it has a snapshot.
 func (u *unstable) maybeFirstIndex() (uint64, bool) {
 	if u.snapshot != nil {
-		return u.snapshot.Metadata.Index + 1, true
+		return u.prev.index, true
 	}
 	return 0, false
 }
 
 // maybeLastIndex returns the last index if it has at least one
 // unstable entry or snapshot.
+//
+// TODO(pav-kv): this is a code compatibility adaptor, remove it.
 func (u *unstable) maybeLastIndex() (uint64, bool) {
-	if l := len(u.entries); l != 0 {
-		return u.offset + uint64(l) - 1, true
-	}
-	if u.snapshot != nil {
-		return u.snapshot.Metadata.Index, true
-	}
-	return 0, false
+	return u.lastIndex(), true
 }
 
-// maybeTerm returns the term of the entry at index i, if there
-// is any.
+// lastIndex returns the last index in the log.
+func (u *unstable) lastIndex() uint64 {
+	return u.prev.index + uint64(len(u.entries))
+}
+
+// lastEntryID returns the ID of the last entry in the log.
+func (u *unstable) lastEntryID() entryID {
+	if ln := len(u.entries); ln != 0 {
+		return pbEntryID(&u.entries[ln-1])
+	}
+	return u.prev
+}
+
+// maybeTerm returns the term of the entry at index i, if there is any.
 func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
-	if i < u.offset {
-		if u.snapshot != nil && u.snapshot.Metadata.Index == i {
-			return u.snapshot.Metadata.Term, true
-		}
+	if i < u.prev.index || i > u.lastIndex() {
 		return 0, false
+	} else if i == u.prev.index {
+		return u.prev.term, true
 	}
-
-	last, ok := u.maybeLastIndex()
-	if !ok {
-		return 0, false
-	}
-	if i > last {
-		return 0, false
-	}
-
-	return u.entries[i-u.offset].Term, true
+	return u.entries[i-u.prev.index-1].Term, true
 }
 
 // nextEntries returns the unstable entries that are not already in the process
 // of being written to storage.
 func (u *unstable) nextEntries() []pb.Entry {
-	inProgress := int(u.offsetInProgress - u.offset)
-	if len(u.entries) == inProgress {
+	if u.inProgress == len(u.entries) {
 		return nil
 	}
-	return u.entries[inProgress:]
+	return u.entries[u.inProgress:]
 }
 
 // nextSnapshot returns the unstable snapshot, if one exists that is not already
@@ -116,10 +116,7 @@ func (u *unstable) nextSnapshot() *pb.Snapshot {
 // entries/snapshots added after a call to acceptInProgress will be returned
 // from those methods, until the next call to acceptInProgress.
 func (u *unstable) acceptInProgress() {
-	if len(u.entries) > 0 {
-		// NOTE: +1 because offsetInProgress is exclusive, like offset.
-		u.offsetInProgress = u.entries[len(u.entries)-1].Index + 1
-	}
+	u.inProgress = len(u.entries)
 	if u.snapshot != nil {
 		u.snapshotInProgress = true
 	}
@@ -138,7 +135,7 @@ func (u *unstable) stableTo(id entryID) {
 		u.logger.Infof("entry at index %d missing from unstable log; ignoring", id.index)
 		return
 	}
-	if id.index < u.offset {
+	if id.index <= u.prev.index {
 		// Index matched unstable snapshot, not unstable entry. Ignore.
 		u.logger.Infof("entry at index %d matched unstable snapshot; ignoring", id.index)
 		return
@@ -152,10 +149,10 @@ func (u *unstable) stableTo(id entryID) {
 			"entry at (%d,%d) in unstable log; ignoring", id.index, id.term, id.index, gt)
 		return
 	}
-	num := int(id.index + 1 - u.offset)
+	num := int(id.index - u.prev.index)
+	u.prev = id
 	u.entries = u.entries[num:]
-	u.offset = id.index + 1
-	u.offsetInProgress = max(u.offsetInProgress, u.offset)
+	u.inProgress -= min(u.inProgress, num)
 	u.shrinkEntriesArray()
 }
 
@@ -186,36 +183,51 @@ func (u *unstable) stableSnapTo(i uint64) {
 }
 
 func (u *unstable) restore(s pb.Snapshot) {
-	u.offset = s.Metadata.Index + 1
-	u.offsetInProgress = u.offset
+	u.prev = entryID{term: s.Metadata.Term, index: s.Metadata.Index}
 	u.entries = nil
 	u.snapshot = &s
+	u.inProgress = 0
 	u.snapshotInProgress = false
 }
 
 func (u *unstable) truncateAndAppend(a logSlice) bool {
-	fromIndex := a.prev.index + 1
-	switch {
-	case fromIndex == u.offset+uint64(len(u.entries)):
-		// fromIndex is the next index in the u.entries, so append directly.
-		u.entries = append(u.entries, a.entries...)
-	case fromIndex <= u.offset:
-		u.logger.Infof("replace the unstable entries from index %d", fromIndex)
-		// The log is being truncated to before our current offset
-		// portion, so set the offset and replace the entries.
-		u.entries = a.entries
-		u.offset = fromIndex
-		u.offsetInProgress = u.offset
-	default:
-		// Truncate to fromIndex (exclusive), and append the new entries.
-		u.logger.Infof("truncate the unstable entries before index %d", fromIndex)
-		keep := u.slice(u.offset, fromIndex)   // NB: appending to this slice is safe,
-		u.entries = append(keep, a.entries...) // and will reallocate/copy it
-		// Only in-progress entries before fromIndex are still considered to be
-		// in-progress.
-		u.offsetInProgress = min(u.offsetInProgress, fromIndex)
+	// We can not accept an append from a leader at term below that of the latest
+	// accepted entry in our log.
+	//
+	// TODO(pav-kv): we should have a stricter check that a.term >= the term of
+	// the latest accepted append rather than entry.
+	if a.term < u.lastEntryID().term {
+		return false
 	}
 
+	// TODO(pav-kv): handle a.prev.index > u.lastIndex(). Currently, it will never
+	// happen here, but this place should handle all cases for ultimate safely.
+	switch {
+	case a.prev.index == u.lastIndex():
+		// The entries immediately follow our slice, so append directly.
+		u.entries = append(u.entries, a.entries...)
+
+	case a.prev.index <= u.prev.index:
+		// TODO(pav-kv): this branch is only safe if a.term >= the last accepted
+		// append term. Add a safety check here, and log error / reject if it does
+		// not hold.
+
+		u.logger.Infof("replace the unstable entries after %d", a.prev.index)
+		u.prev = a.prev
+		u.entries = a.entries
+		// All entries are truncated, so none of the new entries are in progress.
+		u.inProgress = 0
+
+	default:
+		// Truncate to fromIndex (exclusive), and append the new entries.
+		u.logger.Infof("truncate the unstable entries after index %d", a.prev.index)
+		// NB: appending to the `keep` slice is safe, and will reallocate/copy it.
+		// See the slice() method comment.
+		keep := u.slice(u.prev.index+1, a.prev.index+1)
+		u.entries = append(keep, a.entries...)
+		// Only the retained entries remain in-progress.
+		u.inProgress = min(u.inProgress, len(keep))
+	}
 	return true
 }
 
@@ -229,19 +241,21 @@ func (u *unstable) truncateAndAppend(a logSlice) bool {
 // similarly, and document how the client can use them.
 func (u *unstable) slice(lo uint64, hi uint64) []pb.Entry {
 	u.mustCheckOutOfBounds(lo, hi)
+	offset := u.prev.index + 1
 	// NB: use the full slice expression to limit what the caller can do with the
 	// returned slice. For example, an append will reallocate and copy this slice
 	// instead of corrupting the neighbouring u.entries.
-	return u.entries[lo-u.offset : hi-u.offset : hi-u.offset]
+	return u.entries[lo-offset : hi-offset : hi-offset]
 }
 
-// u.offset <= lo <= hi <= u.offset+len(u.entries)
+// u.prev.index < lo <= hi <= u.lastIndex()+1
 func (u *unstable) mustCheckOutOfBounds(lo, hi uint64) {
 	if lo > hi {
 		u.logger.Panicf("invalid unstable.slice %d > %d", lo, hi)
 	}
-	upper := u.offset + uint64(len(u.entries))
-	if lo < u.offset || hi > upper {
-		u.logger.Panicf("unstable.slice[%d,%d) out of bound [%d,%d]", lo, hi, u.offset, upper)
+	lower := u.prev.index + 1
+	upper := lower + uint64(len(u.entries))
+	if lo < lower || hi > upper {
+		u.logger.Panicf("unstable.slice[%d,%d) out of bound [%d,%d)", lo, hi, lower, upper)
 	}
 }
