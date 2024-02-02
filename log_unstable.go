@@ -193,28 +193,30 @@ func (u *unstable) restore(s pb.Snapshot) {
 	u.snapshotInProgress = false
 }
 
-func (u *unstable) truncateAndAppend(ents []pb.Entry) {
-	fromIndex := ents[0].Index
+func (u *unstable) truncateAndAppend(a logSlice) bool {
+	fromIndex := a.prev.index + 1
 	switch {
 	case fromIndex == u.offset+uint64(len(u.entries)):
 		// fromIndex is the next index in the u.entries, so append directly.
-		u.entries = append(u.entries, ents...)
+		u.entries = append(u.entries, a.entries...)
 	case fromIndex <= u.offset:
 		u.logger.Infof("replace the unstable entries from index %d", fromIndex)
 		// The log is being truncated to before our current offset
 		// portion, so set the offset and replace the entries.
-		u.entries = ents
+		u.entries = a.entries
 		u.offset = fromIndex
 		u.offsetInProgress = u.offset
 	default:
 		// Truncate to fromIndex (exclusive), and append the new entries.
 		u.logger.Infof("truncate the unstable entries before index %d", fromIndex)
-		keep := u.slice(u.offset, fromIndex) // NB: appending to this slice is safe,
-		u.entries = append(keep, ents...)    // and will reallocate/copy it
+		keep := u.slice(u.offset, fromIndex)   // NB: appending to this slice is safe,
+		u.entries = append(keep, a.entries...) // and will reallocate/copy it
 		// Only in-progress entries before fromIndex are still considered to be
 		// in-progress.
 		u.offsetInProgress = min(u.offsetInProgress, fromIndex)
 	}
+
+	return true
 }
 
 // slice returns the entries from the unstable log with indexes in the range

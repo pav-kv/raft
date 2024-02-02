@@ -508,7 +508,10 @@ func TestUnstableTruncateAndAppend(t *testing.T) {
 		offsetInProgress uint64
 		snap             *pb.Snapshot
 
+		term     uint64
+		prev     entryID
 		toappend []pb.Entry
+		notOk    bool
 		want     []pb.Entry
 
 		woffset           uint64
@@ -517,12 +520,16 @@ func TestUnstableTruncateAndAppend(t *testing.T) {
 		// append to the end
 		{
 			entries: index(5).terms(1), offset: 5, offsetInProgress: 5,
+			term:     2,
+			prev:     entryID{term: 1, index: 5},
 			toappend: index(6).terms(1, 1),
 			want:     index(5).terms(1, 1, 1),
 			woffset:  5, woffsetInProgress: 5,
 		},
 		{
 			entries: index(5).terms(1), offset: 5, offsetInProgress: 6,
+			term:     2,
+			prev:     entryID{term: 1, index: 5},
 			toappend: index(6).terms(1, 1),
 			want:     index(5).terms(1, 1, 1),
 			woffset:  5, woffsetInProgress: 6,
@@ -530,18 +537,24 @@ func TestUnstableTruncateAndAppend(t *testing.T) {
 		// replace the unstable entries
 		{
 			entries: index(5).terms(1), offset: 5, offsetInProgress: 5,
+			term:     2,
+			prev:     entryID{term: 1, index: 4},
 			toappend: index(5).terms(2, 2),
 			want:     index(5).terms(2, 2),
 			woffset:  5, woffsetInProgress: 5,
 		},
 		{
 			entries: index(5).terms(1), offset: 5, offsetInProgress: 5,
+			term:     2,
+			prev:     entryID{term: 1, index: 3},
 			toappend: index(4).terms(2, 2, 2),
 			want:     index(4).terms(2, 2, 2),
 			woffset:  4, woffsetInProgress: 4,
 		},
 		{
 			entries: index(5).terms(1), offset: 5, offsetInProgress: 6,
+			term:     2,
+			prev:     entryID{term: 1, index: 4},
 			toappend: index(5).terms(2, 2),
 			want:     index(5).terms(2, 2),
 			woffset:  5, woffsetInProgress: 5,
@@ -549,24 +562,32 @@ func TestUnstableTruncateAndAppend(t *testing.T) {
 		// truncate the existing entries and append
 		{
 			entries: index(5).terms(1, 1, 1), offset: 5, offsetInProgress: 5,
+			term:     2,
+			prev:     entryID{term: 1, index: 5},
 			toappend: index(6).terms(2),
 			want:     index(5).terms(1, 2),
 			woffset:  5, woffsetInProgress: 5,
 		},
 		{
 			entries: index(5).terms(1, 1, 1), offset: 5, offsetInProgress: 5,
+			term:     2,
+			prev:     entryID{term: 1, index: 6},
 			toappend: index(7).terms(2, 2),
 			want:     index(5).terms(1, 1, 2, 2),
 			woffset:  5, woffsetInProgress: 5,
 		},
 		{
 			entries: index(5).terms(1, 1, 1), offset: 5, offsetInProgress: 6,
+			term:     2,
+			prev:     entryID{term: 1, index: 5},
 			toappend: index(6).terms(2),
 			want:     index(5).terms(1, 2),
 			woffset:  5, woffsetInProgress: 6,
 		},
 		{
 			entries: index(5).terms(1, 1, 1), offset: 5, offsetInProgress: 7,
+			term:     2,
+			prev:     entryID{term: 1, index: 5},
 			toappend: index(6).terms(2),
 			want:     index(5).terms(1, 2),
 			woffset:  5, woffsetInProgress: 6,
@@ -580,7 +601,10 @@ func TestUnstableTruncateAndAppend(t *testing.T) {
 				snapshot:         tt.snap,
 				logger:           discardLogger,
 			}
-			u.truncateAndAppend(tt.toappend)
+			app := logSlice{term: tt.term, prev: tt.prev, entries: tt.toappend}
+			require.NoError(t, app.valid())
+
+			require.Equal(t, !tt.notOk, u.truncateAndAppend(app))
 			require.Equal(t, tt.want, u.entries)
 			require.Equal(t, tt.woffset, u.offset)
 			require.Equal(t, tt.woffsetInProgress, u.offsetInProgress)
