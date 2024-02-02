@@ -2745,7 +2745,7 @@ func TestLeaderIncreaseNext(t *testing.T) {
 
 	for i, tt := range tests {
 		sm := newTestRaft(1, 10, 1, newTestMemoryStorage(withPeers(1, 2)))
-		sm.raftLog.append(previousEnts...)
+		sm.raftLog.bootstrap(t, entryID{}, previousEnts)
 		sm.becomeCandidate()
 		sm.becomeLeader()
 		sm.trk.Progress[2].State = tt.state
@@ -3100,7 +3100,7 @@ func TestRestoreIgnoreSnapshot(t *testing.T) {
 	commit := uint64(1)
 	storage := newTestMemoryStorage(withPeers(1, 2))
 	sm := newTestRaft(1, 10, 1, storage)
-	sm.raftLog.append(previousEnts...)
+	sm.raftLog.bootstrap(t, entryID{}, previousEnts)
 	sm.raftLog.commitTo(commit)
 
 	s := pb.Snapshot{
