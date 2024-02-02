@@ -30,8 +30,7 @@ func (l *raftLog) bootstrap(t *testing.T, prev entryID, entries []pb.Entry) {
 	app := logSlice{prev: prev, entries: entries}
 	app.term = app.lastEntryID().term
 	require.NoError(t, app.valid())
-	lastIndex := l.append(app)
-	require.Equal(t, l.lastIndex(), lastIndex)
+	require.True(t, l.append(app))
 	require.Equal(t, app.lastEntryID(), l.lastEntryID())
 }
 
@@ -168,42 +167,48 @@ func TestIsUpToDate(t *testing.T) {
 func TestAppend(t *testing.T) {
 	previousEnts := index(1).terms(1, 2)
 	for _, tt := range []struct {
-		ents []pb.Entry
-
+		prev      entryID
+		ents      []pb.Entry
+		notOk     bool
 		want      []pb.Entry
-		windex    uint64
 		wunstable uint64
 	}{
+		{want: index(1).terms(1, 2), wunstable: 3},
 		{
-			ents:   nil,
-			want:   index(1).terms(1, 2),
-			windex: 2, wunstable: 3,
-		},
-		{
-			ents:   index(3).terms(2),
-			want:   index(1).terms(1, 2, 2),
-			windex: 3, wunstable: 3,
+			prev:      entryID{term: 2, index: 2},
+			ents:      index(3).terms(2),
+			want:      index(1).terms(1, 2, 2),
+			wunstable: 3,
 		},
 		// conflicts with index 1
 		{
-			ents:   index(1).terms(2),
-			want:   index(1).terms(2),
-			windex: 1, wunstable: 1,
+			ents:      index(1).terms(2),
+			want:      index(1).terms(2),
+			wunstable: 1,
 		},
 		// conflicts with index 2
 		{
-			ents:   index(2).terms(3, 3),
-			want:   index(1).terms(1, 3, 3),
-			windex: 3, wunstable: 2,
+			prev:      entryID{term: 1, index: 1},
+			ents:      index(2).terms(3, 3),
+			want:      index(1).terms(1, 3, 3),
+			wunstable: 2,
+		},
+		{
+			prev:      entryID{term: 1, index: 2},
+			ents:      index(3).terms(4),
+			notOk:     true,
+			want:      index(1).terms(1, 2),
+			wunstable: 3,
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			app := logSlice{prev: entryID{}, entries: tt.ents}
+			app := logSlice{term: 10, prev: tt.prev, entries: tt.ents}
+			require.NoError(t, app.valid())
 
 			storage := NewMemoryStorage()
 			require.NoError(t, storage.Append(previousEnts))
 			log := newLog(storage, discardLogger)
-			require.Equal(t, tt.windex, log.append(app))
+			require.Equal(t, !tt.notOk, log.append(app))
 			entries, err := log.entries(1, noLimit)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, entries)

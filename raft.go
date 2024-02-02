@@ -810,11 +810,14 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 		// Drop the proposal.
 		return false
 	}
-	newLast := r.raftLog.append(logSlice{
+	if !r.raftLog.append(logSlice{
 		term:    r.Term, // appending on behalf of ourselves
 		prev:    last,   // appending after the last entry
 		entries: es,
-	})
+	}) {
+		r.logger.Errorf("%x leader could not append to its own log", r.id)
+		return false
+	}
 	// The leader needs to self-ack the entries just appended once they have
 	// been durably persisted (since it doesn't send an MsgApp to itself). This
 	// response message will be added to msgsAfterAppend and delivered back to
@@ -825,7 +828,7 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 	//  if r.maybeCommit() {
 	//  	r.bcastAppend()
 	//  }
-	r.send(pb.Message{To: r.id, Type: pb.MsgAppResp, Index: newLast})
+	r.send(pb.Message{To: r.id, Type: pb.MsgAppResp, Index: r.raftLog.lastEntryID().index})
 	return true
 }
 
