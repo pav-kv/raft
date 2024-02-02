@@ -102,16 +102,7 @@ func (l *raftLog) String() string {
 		l.committed, l.applied, l.applying, l.unstable.offset, l.unstable.offsetInProgress, len(l.unstable.entries))
 }
 
-// maybeAppend returns (0, false) if the entries cannot be appended. Otherwise,
-// it returns (last index of new entries, true).
-func (l *raftLog) maybeAppend(a logSlice, committed uint64) (lastnewi uint64, ok bool) {
-	if !l.append(a) {
-		return 0, false
-	}
-	l.commitTo(min(committed, a.lastIndex()))
-	return a.lastIndex(), true
-}
-
+// append returns true iff the entries were appended.
 func (l *raftLog) append(a logSlice) bool {
 	match, ok := l.findConflict(a)
 	if !ok {

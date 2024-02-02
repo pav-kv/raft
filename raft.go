@@ -1769,8 +1769,9 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: r.raftLog.committed})
 		return
 	}
-	if mlastIndex, ok := r.raftLog.maybeAppend(a, m.Commit); ok {
-		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
+	if r.raftLog.append(a) {
+		r.raftLog.commitTo(min(m.Commit, a.lastIndex()))
+		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: a.lastIndex()})
 		return
 	}
 	r.logger.Debugf("%x [logterm: %d, index: %d] rejected MsgApp [logterm: %d, index: %d] from %x",

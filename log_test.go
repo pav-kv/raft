@@ -241,7 +241,6 @@ func TestLogMaybeAppend(t *testing.T) {
 		notOk     bool
 
 		wpanic  bool
-		wlasti  uint64
 		wcommit uint64
 	}{
 		// not match: term is different
@@ -259,64 +258,64 @@ func TestLogMaybeAppend(t *testing.T) {
 		// match with the last existing entry
 		{
 			prev: ids[3], committed: 3,
-			wlasti: 3, wcommit: 3,
+			wcommit: 3,
 		},
 		{
 			prev: ids[3], committed: 4,
-			wlasti: 3, wcommit: 3, // do not increase commit above the given entries
+			wcommit: 3, // do not increase commit above the given entries
 		},
 		{
 			prev: ids[3], committed: 2,
-			wlasti: 3, wcommit: 2, // commit up to the commit in the message
+			wcommit: 2, // commit up to the commit in the message
 		},
 		{
 			prev: ids[3], committed: 0,
-			wlasti: 3, wcommit: commit, // commit do not decrease
+			wcommit: commit, // commit do not decrease
 		},
 		{
 			prev: ids[0], committed: 3,
-			wlasti: 0, wcommit: commit, // commit do not decrease
+			wcommit: commit, // commit do not decrease
 		},
 		{
 			prev: ids[3],
 			ents: index(4).terms(4), committed: 3,
-			wlasti: 4, wcommit: 3,
+			wcommit: 3,
 		},
 		{
 			prev: ids[3],
 			ents: index(4).terms(4), committed: 4,
-			wlasti: 4, wcommit: 4,
+			wcommit: 4,
 		},
 		{
 			prev: ids[3],
 			ents: index(4).terms(4), committed: 5,
-			wlasti: 4, wcommit: 4, // do not increase commit higher than lastnewi
+			wcommit: 4, // do not increase commit higher than lastnewi
 		},
 		{
 			prev: ids[3], ents: index(4).terms(4, 4),
 			committed: 5,
-			wlasti:    5, wcommit: 5,
+			wcommit: 5,
 		},
 		// match with the entry in the middle
 		{
 			prev: ids[2],
 			ents: index(3).terms(4), committed: 3,
-			wlasti: 3, wcommit: 3,
+			wcommit: 3,
 		},
 		{
 			prev: ids[1],
 			ents: index(2).terms(4), committed: 3,
-			wlasti: 2, wcommit: 2,
+			wcommit: 2,
 		},
 		{
 			prev: ids[0],
 			ents: index(1).terms(4), committed: 3,
-			wpanic: true, wlasti: 1, wcommit: 1, // conflict with existing committed entry
+			wpanic: true, wcommit: 1, // conflict with existing committed entry
 		},
 		{
 			prev: ids[1],
 			ents: index(2).terms(4, 4), committed: 3,
-			wlasti: 3, wcommit: 3,
+			wcommit: 3,
 		},
 	} {
 		// TODO(pav-kv): for now, we pick a high enough app.term so that it
@@ -339,9 +338,13 @@ func TestLogMaybeAppend(t *testing.T) {
 					require.True(t, tt.wpanic)
 				}
 			}()
-			last, ok := log.maybeAppend(app, tt.committed)
+			ok := log.append(app)
 			require.Equal(t, !tt.notOk, ok)
-			require.Equal(t, tt.wlasti, last)
+			if ok {
+				// TODO(pav-kv): test commit logic separately, there is no need to mix
+				// two things in this one test.
+				log.commitTo(min(tt.committed, app.lastIndex()))
+			}
 			require.Equal(t, tt.wcommit, log.committed)
 			if ok && len(app.entries) != 0 {
 				appended, err := log.slice(app.prev.index+1, log.lastIndex()+1, noLimit)
