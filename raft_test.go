@@ -3073,13 +3073,9 @@ func TestLearnerReceiveSnapshot(t *testing.T) {
 	}
 
 	store := newTestMemoryStorage(withPeers(1), withLearners(2))
+	store.snapshot = s
 	n1 := newTestLearnerRaft(1, 10, 1, store)
 	n2 := newTestLearnerRaft(2, 10, 1, newTestMemoryStorage(withPeers(1), withLearners(2)))
-
-	n1.restore(s)
-	snap := n1.raftLog.nextUnstableSnapshot()
-	store.ApplySnapshot(*snap)
-	n1.appliedSnap(snap)
 
 	nt := newNetwork(n1, n2)
 
